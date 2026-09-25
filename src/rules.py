@@ -20,3 +20,21 @@ def validate_transition(current,target):
     if not can_transition(current,target): raise ConflictError(f"不能从{current}转换到{target}")
 def completion_blockers(target,open_records): return ["仍有未关闭事项"] if target in TERMINAL_STATES and open_records>0 else []
 def role_for_transition(target): return set(TRANSITION_ROLES.get(target,[]))
+NOTICE_DIRECTIONS=['restricted', 'closed']; CRITICAL_RECORD_KIND=SEVERITIES[-1]; RESTRICT_RATIO=0.75
+NOTICE_ROLES=set(['traffic_authority']); CONFIRM_ROLES=set(['traffic_authority']); RESTORE_ROLES=set(['bridge_engineer'])
+CONFIRM_SOURCES={'restricted': set(['normal', 'warning']), 'closed': set(['normal', 'warning', 'restricted'])}; RESTORE_SOURCES=set(['restricted', 'closed'])
+def assess_disposition(quantity,threshold,open_records=0,critical_open_records=0):
+    ratio=quantity/threshold if threshold>0 else 1.0
+    reasons=[]
+    if ratio>=1.0: reasons.append('读数达到阈值')
+    if critical_open_records>0: reasons.append('存在严重级未关闭记录')
+    if reasons: return {'recommendation': 'closed', 'reasons': reasons, 'ratio': round(ratio,4)}
+    if ratio>RESTRICT_RATIO: reasons.append('读数超过阈值四分之三')
+    if open_records>=2: reasons.append('存在两项及以上未关闭异常')
+    if reasons: return {'recommendation': 'restricted', 'reasons': reasons, 'ratio': round(ratio,4)}
+    return {'recommendation': 'observe', 'reasons': ['继续观察'], 'ratio': round(ratio,4)}
+def validate_confirm(current,target):
+    if target not in NOTICE_DIRECTIONS: raise ValidationError("未知处置方向")
+    if current not in CONFIRM_SOURCES[target]: raise ConflictError(f"不能从{current}确认{target}")
+def validate_restore(current):
+    if current not in RESTORE_SOURCES: raise ConflictError(f"不能从{current}恢复")

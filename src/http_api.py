@@ -89,6 +89,11 @@ def make_handler(service: Service, static_dir: str):
                     actor, role = self._identity()
                     del actor
                     self._json(200, {"records": service.list_records(item_id, role)})
+                elif path.startswith("/api/items/") and path.endswith("/notices"):
+                    item_id = int(path.split("/")[3])
+                    actor, role = self._identity()
+                    del actor
+                    self._json(200, {"notices": service.list_notices(item_id, role)})
                 elif path.startswith("/api/items/"):
                     item_id = int(path.rsplit("/", 1)[-1])
                     actor, role = self._identity()
@@ -110,6 +115,11 @@ def make_handler(service: Service, static_dir: str):
                 body = self._body()
                 if path == "/api/items":
                     self._json(201, service.create_item(body, actor, role))
+                elif path.startswith("/api/items/") and "/records/" in path and path.endswith("/close"):
+                    parts = path.split("/")
+                    item_id = int(parts[3])
+                    record_id = int(parts[5])
+                    self._json(200, service.close_record(item_id, record_id, actor, role))
                 elif path.startswith("/api/items/") and path.endswith("/records"):
                     item_id = int(path.split("/")[3])
                     self._json(201, service.add_record(item_id, body, actor, role))
@@ -119,6 +129,18 @@ def make_handler(service: Service, static_dir: str):
                     expected = body.get("expected_version")
                     self._json(200, service.transition(
                         item_id, target, expected, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/assessment"):
+                    item_id = int(path.split("/")[3])
+                    self._json(200, service.assess(item_id, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/notices"):
+                    item_id = int(path.split("/")[3])
+                    self._json(201, service.create_notice(item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/confirm"):
+                    item_id = int(path.split("/")[3])
+                    self._json(200, service.confirm(item_id, body, actor, role))
+                elif path.startswith("/api/items/") and path.endswith("/restore"):
+                    item_id = int(path.split("/")[3])
+                    self._json(200, service.restore(item_id, body, actor, role))
                 else:
                     self._json(404, {"error": "not_found"})
             except Exception as exc:

@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from .audit import make_entry, utc_now
 from .domain import ConflictError, NotFoundError
-from .rules import ID_PREFIX, STATES
+from .rules import CRITICAL_RECORD_KIND, ID_PREFIX, STATES
 
 
 class Repository:
@@ -53,6 +53,18 @@ class Repository:
                     created_by TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     UNIQUE(item_id, external_ref)
+                );
+                CREATE TABLE IF NOT EXISTS notices (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    item_id INTEGER NOT NULL REFERENCES items(id) ON DELETE CASCADE,
+                    direction TEXT NOT NULL CHECK(direction IN ('restricted','closed')),
+                    detail TEXT NOT NULL,
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK(status IN ('active','revoked')),
+                    created_by TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    revoked_by TEXT,
+                    revoked_at TEXT
                 );
                 CREATE TABLE IF NOT EXISTS audit_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -135,8 +147,36 @@ class Repository:
                     (item_id, kind, detail, status, external_ref, actor, now),
                 )
                 record_id = int(cur.lastrowid)
+                self.conn.execute(
+                    "UPDATE items SET version=version+1, updated_at=? WHERE id=?",
+                    (now, item_id),
+                )
         except sqlite3.IntegrityError as exc:
             raise ConflictError("记录唯一标识已存在") from exc
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
+        return dict(row)
+
+    def close_record(self, item_id: int, record_id: int, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                "UPDATE records SET status='closed' WHERE id=? AND item_id=? AND status='open'",
+                (record_id, item_id),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM records WHERE id=? AND item_id=?",
+                    (record_id, item_id),
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError("记录不存在")
+                raise ConflictError("记录已关闭")
+            self.conn.execute(
+                "UPDATE items SET version=version+1, updated_at=? WHERE id=?",
+                (now, item_id),
+            )
         with self._lock:
             row = self.conn.execute("SELECT * FROM records WHERE id=?", (record_id,)).fetchone()
         return dict(row)
@@ -156,6 +196,68 @@ class Repository:
                 (item_id,),
             ).fetchone()
         return int(row["n"])
+
+    def open_critical_record_count(self, item_id: int) -> int:
+        with self._lock:
+            row = self.conn.execute(
+                """SELECT COUNT(*) AS n FROM records
+                   WHERE item_id=? AND status='open' AND LOWER(kind)=?""",
+                (item_id, CRITICAL_RECORD_KIND),
+            ).fetchone()
+        return int(row["n"])
+
+    def create_notice(self, item_id: int, direction: str, detail: str,
+                      actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        self.get_item(item_id)
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """INSERT INTO notices(item_id, direction, detail, status,
+                   created_by, created_at) VALUES(?,?,?,'active',?,?)""",
+                (item_id, direction, detail, actor, now),
+            )
+            notice_id = int(cur.lastrowid)
+        return self.get_notice(notice_id)
+
+    def get_notice(self, notice_id: int) -> Dict[str, Any]:
+        with self._lock:
+            row = self.conn.execute("SELECT * FROM notices WHERE id=?", (notice_id,)).fetchone()
+        if row is None:
+            raise NotFoundError("通告不存在")
+        return dict(row)
+
+    def list_notices(self, item_id: int) -> List[Dict[str, Any]]:
+        self.get_item(item_id)
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM notices WHERE item_id=? ORDER BY id", (item_id,)
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def list_active_notices(self, item_id: int) -> List[Dict[str, Any]]:
+        with self._lock:
+            rows = self.conn.execute(
+                "SELECT * FROM notices WHERE item_id=? AND status='active' ORDER BY id",
+                (item_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def revoke_notice(self, notice_id: int, actor: str) -> Dict[str, Any]:
+        now = utc_now()
+        with self._lock, self.conn:
+            cur = self.conn.execute(
+                """UPDATE notices SET status='revoked', revoked_by=?, revoked_at=?
+                   WHERE id=? AND status='active'""",
+                (actor, now, notice_id),
+            )
+            if cur.rowcount == 0:
+                exists = self.conn.execute(
+                    "SELECT 1 FROM notices WHERE id=?", (notice_id,)
+                ).fetchone()
+                if exists is None:
+                    raise NotFoundError("通告不存在")
+                raise ConflictError("通告已撤销")
+        return self.get_notice(notice_id)
 
     def append_audit(self, action: str, entity_type: str, entity_id: int,
                      actor: str, detail: dict) -> Dict[str, Any]:
